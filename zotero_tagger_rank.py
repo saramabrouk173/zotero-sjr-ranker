@@ -1,85 +1,108 @@
 from pyzotero import zotero
 import pandas as pd
 import os
+import re
 import time
 
-# --- 1. Authentication Setup ---
-# Insert your Zotero User ID and API Key here
-# You can find these in your Zotero account settings (Feeds/API)
-LIBRARY_ID = 'YOUR_ZOTERO_ID' 
-API_KEY = 'YOUR_ZOTERO_API_KEY'
-LIBRARY_TYPE = 'user' # or 'group'
+# --- 1. Credentials (Personal Information Removed) ---
+# Replace the values below with your actual Zotero credentials
+LIBRARY_ID = 'YOUR_LIBRARY_ID_HERE' 
+API_KEY = 'YOUR_API_KEY_HERE'
+LIBRARY_TYPE = 'user' # Change to 'group' if using a group library
 
-zot = zotero.Zotero(LIBRARY_ID, LIBRARY_TYPE, API_KEY)
-
-# --- 2. Locating the SJR Ranking File (CSV) ---
-# The script looks for a file starting with 'scimagojr' on the Desktop
-desktop_path = os.path.join(os.path.expanduser('~'), 'Desktop')
-sjr_file = None
-
-for file in os.listdir(desktop_path):
-    if file.startswith('scimagojr') and file.endswith('.csv'):
-        sjr_file = os.path.join(desktop_path, file)
-        break
-
-if not sjr_file:
-    print("❌ Error: SJR CSV file not found on Desktop. Please download it from ScimagoJR.")
+try:
+    zot = zotero.Zotero(LIBRARY_ID, LIBRARY_TYPE, API_KEY)
+    zot.num_items()
+    print("✅ Connection to Zotero established successfully!")
+except Exception as e:
+    print(f"❌ Connection Error: {e}")
     exit()
 
-print(f"✅ Found Journal Database: {os.path.basename(sjr_file)}")
+# --- 2. Advanced Cleaning Functions ---
+def clean_text(text):
+    """Removes all non-alphanumeric characters for flexible title matching."""
+    if not text: return ""
+    return re.sub(r'[^a-z0-9]', '', str(text).lower())
 
-# --- 3. Loading Rankings into Memory ---
+def extract_issns(issn_str):
+    """Extracts all 8-character ISSN sequences from a string."""
+    if not issn_str: return set()
+    found = re.findall(r'([0-9]{4})[- ]?([0-9]{3}[0-9X])', str(issn_str).upper())
+    return {f"{p[0]}{p[1]}" for p in found}
+
+# --- 3. Loading SJR Data ---
+current_folder = os.path.dirname(os.path.abspath(__file__))
+sjr_file = next((os.path.join(current_folder, f) for f in os.listdir(current_folder) 
+                 if f.lower().startswith('scimagojr') and f.endswith('.csv')), None)
+
+if not sjr_file:
+    print("❌ Error: SJR CSV file not found.")
+    exit()
+
+print(f"✅ Processing: {os.path.basename(sjr_file)}")
+
 try:
-    # Attempting to read with semicolon separator (default for SJR)
-    sjr_df = pd.read_csv(sjr_file, sep=';')
-except:
-    sjr_df = pd.read_csv(sjr_file, sep=',')
+    df = pd.read_csv(sjr_file, sep=';', low_memory=False)
+    df['Clean_Title'] = df['Title'].apply(clean_text)
+    df['ISSN_Set'] = df['Issn'].apply(extract_issns)
+    
+    q_col = 'SJR Best Quartile' if 'SJR Best Quartile' in df.columns else None
+    if not q_col:
+        print("❌ Error: Could not find Quartile column in CSV.")
+        exit()
+        
+    print(f"✅ Database loaded. Found {len(df)} journals.")
+except Exception as e:
+    print(f"❌ Parsing Error: {e}")
+    exit()
 
-# Clean journal titles for better matching
-sjr_df['Title_Clean'] = sjr_df['Title'].str.lower().str.strip()
-journal_rank_map = dict(zip(sjr_df['Title_Clean'], sjr_df['SJR Best Quartile']))
-
-print("🚀 Scanning Zotero library and applying tags...")
-
-# --- 4. Fetching and Processing Zotero Items ---
-all_items = zot.everything(zot.items())
+# --- 4. Zotero Processing ---
+print("🚀 Fetching items from Zotero...")
+items = zot.everything(zot.top()) 
 updated_count = 0
 
-for item in all_items:
-    try:
-        # Check if the item is a journal article
-        if item['data'].get('itemType') == 'journalArticle':
-            journal_name = item['data'].get('publicationTitle', '').lower().strip()
-            item_title = item['data'].get('title', '')[:50]
-            
-            if not journal_name: 
-                continue
+print(f"📊 Analyzing {len(items)} items...")
 
-            # Look for exact or partial rank match
-            rank = journal_rank_map.get(journal_name)
-            
-            # Fuzzy matching if exact match fails
-            if not rank:
-                for sjr_title, sjr_rank in journal_rank_map.items():
-                    if journal_name in sjr_title or sjr_title in journal_name:
-                        rank = sjr_rank
-                        break
-            
-            if rank:
-                # Check current tags to avoid duplicates
-                current_tags = [t.get('tag') for t in item['data'].get('tags', [])]
-                
-                if rank not in current_tags:
-                    # Apply the rank as a new tag
-                    zot.add_tags(item, rank)
-                    updated_count += 1
-                    print(f"✅ Tagged [{rank}] -> {item_title}...")
-                    
-                    # Small delay to respect API rate limits
-                    time.sleep(0.3) 
-    except Exception as e:
-        print(f"⚠️ Could not process item: {e}")
+for item in items:
+    if item['data'].get('itemType') != 'journalArticle':
         continue
 
-print(f"\n✨ Automation Complete! {updated_count} items updated.")
-print("Sync your Zotero desktop app to see the changes.")
+    z_pub = item['data'].get('publicationTitle', '')
+    z_issns = extract_issns(item['data'].get('ISSN', ''))
+    z_pub_clean = clean_text(z_pub)
+
+    match_row = None
+
+    # Step 1: Match by ISSN
+    if z_issns:
+        match_mask = df['ISSN_Set'].apply(lambda db_set: not z_issns.isdisjoint(db_set))
+        if match_mask.any():
+            match_row = df[match_mask].iloc[0]
+
+    # Step 2: Fallback to Title match
+    if match_row is None and z_pub_clean:
+        title_mask = df['Clean_Title'] == z_pub_clean
+        if title_mask.any():
+            match_row = df[title_mask].iloc[0]
+
+    # Step 3: Apply Tag (Rank or NOT RANKED)
+    new_tag = None
+    existing_tags = [t['tag'] for t in item['data'].get('tags', [])]
+
+    if match_row is not None:
+        rank = match_row[q_col]
+        if pd.notna(rank) and rank != '-':
+            new_tag = str(rank).upper()
+        else:
+            new_tag = "NOT RANKED"
+    else:
+        new_tag = "NOT RANKED"
+
+    # Add the tag if it's not already there
+    if new_tag and new_tag not in existing_tags:
+        zot.add_tags(item, new_tag)
+        updated_count += 1
+        print(f"✨ Tagged: {z_pub[:30]}... -> {new_tag}")
+        time.sleep(0.1)
+
+print(f"\n✅ Finished! Successfully tagged {updated_count} items.")
