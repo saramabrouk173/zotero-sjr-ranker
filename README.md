@@ -34,7 +34,7 @@ pip install -r requirements.txt
 
 ### 3. Configuration
 
-Open the `zotero_tagger.py` file and replace the placeholders with your actual credentials:
+Open the `zotero_tagger_rank.py` file and replace the placeholders with your actual credentials:
 
 ```python
 LIBRARY_ID = 'YOUR_ZOTERO_ID'
@@ -44,7 +44,7 @@ API_KEY = 'YOUR_ZOTERO_API_KEY'
 ### 4. Run the Automation
 
 ```bash
-python zotero_tagger.py
+python zotero_tagger_rank.py
 ```
 
 ---
